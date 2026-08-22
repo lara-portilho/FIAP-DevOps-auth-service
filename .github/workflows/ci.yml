@@ -1,0 +1,74 @@
+name: CI & DevSecOps - Auth Service
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+
+      - name: Configurar o Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21' # Ajuste conforme a versão do go.mod se necessário
+
+      - name: Instalar Dependências
+        run: go mod download
+
+      - name: Executar Testes Unitários
+        run: go test -v ./...
+
+      - name: Análise Estática (Go Vet)
+        run: go vet ./...
+
+      - name: Security Scan (SAST com Trivy - Filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '1' # Bloqueia o pipeline se encontrar vulnerabilidades críticas
+          severity: 'CRITICAL,HIGH'
+
+      - name: Configurar Credenciais da AWS (ECR)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1 # Ajuste a região se necessário
+
+      - name: Login no Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build da Imagem Docker
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: auth-service # Nome do repositório no ECR
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG -t $REGISTRY/$REPOSITORY:latest .
+
+      - name: Security Scan na Imagem Docker (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ steps.login-ecr.outputs.registry }}/auth-service:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push da Imagem para o Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: auth-service
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
+          docker push $REGISTRY/$REPOSITORY:latest
