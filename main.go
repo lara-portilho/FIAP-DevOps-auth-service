@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
 	"os"
 
+	"github.com/XSAM/otelsql"
 	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/joho/godotenv"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 )
 
 // App struct (para injeção de dependência)
@@ -19,6 +22,18 @@ type App struct {
 func main() {
 	// Carrega o .env para desenvolvimento local. Em produção, isso não fará nada.
 	_ = godotenv.Load()
+	setupLogging()
+
+	// --- Telemetria (OpenTelemetry) ---
+	shutdownTelemetry, err := initTelemetry(context.Background())
+	if err != nil {
+		log.Fatalf("Não foi possível inicializar o OpenTelemetry: %v", err)
+	}
+	defer func() {
+		if err := shutdownTelemetry(context.Background()); err != nil {
+			log.Printf("Erro ao finalizar o OpenTelemetry: %v", err)
+		}
+	}()
 
 	// --- Configuração ---
 	port := os.Getenv("PORT")
@@ -64,14 +79,18 @@ func main() {
 	mux.Handle("/admin/keys", app.masterKeyAuthMiddleware(http.HandlerFunc(app.createKeyHandler)))
 
 	log.Printf("Serviço de Autenticação (Go) rodando na porta %s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, instrumentHandler(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// connectDB inicializa e testa a conexão com o PostgreSQL
+// connectDB inicializa e testa a conexão com o PostgreSQL. O otelsql gera um
+// span por query (filho do span da requisição quando usado com *Context).
 func connectDB(databaseURL string) (*sql.DB, error) {
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := otelsql.Open("pgx", databaseURL,
+		otelsql.WithAttributes(semconv.DBSystemNamePostgreSQL),
+		otelsql.WithSpanOptions(otelsql.SpanOptions{OmitConnResetSession: true, OmitRows: true}),
+	)
 	if err != nil {
 		return nil, err
 	}
